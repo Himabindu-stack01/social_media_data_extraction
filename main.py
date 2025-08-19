@@ -1,26 +1,74 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, HTTPException, Depends
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from database import get_db
-from models import YouTubeVideo
+from database import engine, SessionLocal, Base
+from models import YouTubeVideo, TextData
+import yt_dlp
+Base.metadata.drop_all(bind=engine)
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-@app.post("/save_youtube/")
-def save_youtube_video(title: str, upload_date: str, db: Session = Depends(get_db)):
-    video = YouTubeVideo(title=title, upload_date=upload_date)
-    db.add(video)
-    db.commit()
-    db.refresh(video)
-    return {"message": "Video saved", "id": video.id}
 
-@app.post("/save_text/")
-def save_text_to_file(content: str):
-    file_path = "youtube_data.txt"
-    with open(file_path, "a", encoding="utf-8") as f:
-        f.write(content + "\n")
-    return {"message": f"Content saved to {file_path}"}
-@app.get("/videos/")
-def get_youtube_videos(db: Session = Depends(get_db)):
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+class YouTubeRequest(BaseModel):
+    url: str
+
+class TextRequest(BaseModel):
+    content: str
+
+
+@app.post("/save_youtube")
+def save_youtube(request: YouTubeRequest, db: Session = Depends(get_db)):
+    try:
+        ydl_opts = {"quiet": True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(request.url, download=False)
+
+        video = YouTubeVideo(
+            video_id=info.get("id"),
+            title=info.get("title"),
+            description=info.get("description"),
+            channel=info.get("uploader"),
+            url=request.url,
+            upload_date=info.get("upload_date"),
+            view_count=info.get("view_count"),
+            like_count=info.get("like_count")
+        )
+        db.add(video)
+
+     
+        if info.get("description"):
+            text_entry = TextData(content=info.get("description"))
+            db.add(text_entry)
+
+        db.commit()
+        db.refresh(video)
+        return {
+            "message": "Video and text saved successfully",
+            "video": video.title,
+            "views": video.view_count,
+            "likes": video.like_count,
+            "upload_date": video.upload_date
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/videos")
+def get_videos(db: Session = Depends(get_db)):
     videos = db.query(YouTubeVideo).all()
     return videos
 
+
+@app.get("/texts")
+def get_texts(db: Session = Depends(get_db)):
+    texts = db.query(TextData).all()
+    return texts
